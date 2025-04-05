@@ -1,2 +1,2 @@
 # Deploy_Bare_Metal
-Automation for deployment of ESXi servers on Equinix Bare Metal.
+Contains Terraform code to deploy bare-metal ESXi servers on Equinix on-prem locations.
