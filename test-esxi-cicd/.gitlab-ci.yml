@@ -1,0 +1,133 @@
+stages:
+  - plan
+  - deploy
+  - plan_destroy
+  - destroy
+
+image: example.com/registry/base-image:2.0.2
+
+variables:
+  TERRAFORM_VERSION: "1.9.2"
+  # TF_VAR_s3_bucket: "tf_state_bucket_name"
+  TF_VAR_pipeline_id: "${CI_PIPELINE_ID}"
+  TF_VAR_INFOBLOX_USERNAME: "${INFOBLOX_USERNAME}"
+  TF_VAR_INFOBLOX_PASSWORD: "${INFOBLOX_PASSWORD}"
+
+before_script:
+  - echo ${http_proxy}
+  - echo ${https_proxy}
+  - export http_proxy=${http_proxy}
+  - export https_proxy=${https_proxy}
+  - export TF_LOG=${TF_VAR_debug}
+  - SYSTEM=`uname | tr '[:upper:]' '[:lower:]'`
+  # Sneaky sneaky, Get from local repository the required providers that gitrunner cannot access from internet, and install them as local providers
+  # will be one-time installed in script_init_core with https://developer.hashicorp.com/terraform/cli/commands/init#plugin-dir-path
+  - mkdir -p /usr/local/lib/terraform_local/registry.terraform.io/infobloxopen/infoblox/2.7.0/linux_amd64
+  - mkdir -p /usr/local/lib/terraform_local/registry.terraform.io/equinix/equinix/2.3.1/linux_amd64
+  - wget -P /tmp http://example.com/path/terraform_local_store/registry.terraform.io/infobloxopen/infoblox/terraform-provider-infoblox_2.7.0_linux_amd64.zip
+  - wget -P /tmp http://example.com/path/terraform_local_store/registry.terraform.io/equinix/equinix/terraform-provider-equinix_2.3.1_linux_amd64.zip
+  - wget -P /tmp http://example.com/path/terraform_local_store/terraformrc
+  - mv /tmp/terraformrc ~/.terraformrc
+  - unzip /tmp/terraform-provider-infoblox_2.7.0_linux_amd64.zip -d /usr/local/lib/terraform_local/registry.terraform.io/infobloxopen/infoblox/2.7.0/linux_amd64/
+  - unzip /tmp/terraform-provider-equinix_2.3.1_linux_amd64.zip -d /usr/local/lib/terraform_local/registry.terraform.io/equinix/equinix/2.3.1/linux_amd64/
+  - echo -e "machine example.com\nlogin gitlab-ci-token\npassword ${CI_JOB_TOKEN}" > ~/.netrc
+  - tfenv install latest:^1.9
+  - tfenv use 1.9.2
+  - cat /etc/os-release
+  - terraform -v
+  # install powershell for whatever flavor the runner is
+  # install powercli, too
+  # install bash and sshpass
+
+##### Server Init Script - Modified Module Structure #####
+.script_init_core: &script_init_core |
+  terraform init
+  export TF_VAR_ci_pipeline_id=${CI_PIPELINE_ID}
+  export TF_VAR_ci_commit_ref_name=${CI_COMMIT_REF_NAME}
+  export TF_VAR_ci_project_dir=${CI_PROJECT_DIR}
+  export TF_VAR_gitlab_project_path=${STATE_PATH}
+  export TF_VAR_src_token=${BUILD_TOKEN}
+  export INFOBLOX_USERNAME=${INFOBLOX_USERNAME}
+  export INFOBLOX_PASSWORD=${INFOBLOX_PASSWORD}
+  if [[ "${CI_COMMIT_TAG}" == "" && "${CI_COMMIT_REF_NAME}" != "master" ]]; then export TF_VAR_test_branch="true" && export TF_VAR_name_suffix="$(printf '%s' "${CI_PROJECT_DIR}/${CI_COMMIT_REF_NAME}" | md5sum | cut -d ' ' -f 1 | xargs -0 printf '%.5s')"; fi
+  if [[ "${CI_COMMIT_TAG}" == "" && "${CI_COMMIT_REF_NAME}" != "dev" ]]; then export TF_VAR_test_branch="true" && export TF_VAR_name_suffix="$(printf '%s' "${CI_PROJECT_DIR}/${CI_COMMIT_REF_NAME}" | md5sum | cut -d ' ' -f 1 | xargs -0 printf '%.5s')"; fi
+
+##### TAGS #####
+.eqxloc3_tags: &eqxloc3_tags
+  tags:
+    - automation
+    - docker
+    - eqxloc3
+    - tekops
+
+##### MAIN VARIABLES #####
+.eqxloc3_app_vars: &eqxloc3_app_vars
+  variables:
+    http_proxy: "http://proxy.example.com:proxy_port"
+    https_proxy: "http://proxy.example.com:proxy_port"
+    no_proxy: ".example.com,localhost,127.0.0.1"
+
+##### Pipeline Workflows #####
+workflow:
+  rules:
+    # Do Not Create Pipelines if branch is not 'master' or 'dev'
+    - if: $CI_COMMIT_REF_NAME == "master"
+      when: always
+    - if: $CI_COMMIT_REF_NAME == "dev"
+      when: always
+
+##### Templates #####
+.plan_tpl: &plan_tpl
+  script:
+    - *script_init_core
+    - terraform plan
+    - terraform show
+
+.deploy_tpl: &deploy_tpl
+  when: manual
+  variables:
+    LOCK_FILE: esxi_build.lock.json
+  rules:
+    - if: $CI_COMMIT_REF_NAME == "dev"
+      when: always
+    - exists:
+      - esxi_build.lock.json
+
+  script:
+    - *script_init_core
+    - terraform apply -auto-approve
+    - terraform show
+  artifacts:
+    expire_in: 4 weeks
+    when: always
+    paths:
+      - ${CI_PROJECT_DIR}/logfiles/
+
+.plan_destroy_tpl: &plan_destroy_tpl
+  when: manual
+  script:
+    - *script_init_core
+    - terraform plan -destroy
+
+.destroy_tpl: &destroy_tpl
+  when: manual
+  script:
+    - *script_init_core
+    - terraform destroy -auto-approve
+
+##### ESXi #####
+plan_deploy_eqxloc3_esxi:
+  stage: plan
+  <<: [*eqxloc3_app_vars, *eqxloc3_tags, *plan_tpl]
+
+deploy_eqxloc3_esxi:
+  stage: deploy
+  <<: [*eqxloc3_app_vars, *eqxloc3_tags, *deploy_tpl]
+
+plan_destroy_eqxloc3_esxi:
+  stage: plan_destroy
+  <<: [*eqxloc3_app_vars, *eqxloc3_tags, *plan_destroy_tpl]
+
+destroy_eqxloc3_esxi:
+  stage: destroy
+  <<: [*eqxloc3_app_vars, *eqxloc3_tags, *destroy_tpl]
